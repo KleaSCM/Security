@@ -1,15 +1,14 @@
 /**
- * Process sandboxing module provides comprehensive process isolation
- * capabilities including namespace isolation, resource limits, and
- * user/group isolation for secure process execution. The module
- * implements multiple isolation layers to prevent process interference
- * and ensure secure execution environments.
+ * Advanced process sandboxing module with comprehensive isolation
  * 
- * The sandboxing system employs Linux namespaces, resource limits,
- * and user isolation to create secure execution environments that
- * prevent privilege escalation and system compromise. Sandboxed
- * processes are monitored for security violations and resource
- * usage to maintain system integrity.
+ * Provides sophisticated process isolation including namespace isolation,
+ * resource limits, seccomp filtering, and memory protection for secure
+ * process execution.
+ * 
+ * Author: KleaSCM
+ * Email: KleaSCM@gmail.com
+ * File: sandbox.rs
+ * Description: Advanced process sandboxing and isolation
  */
 
 use anyhow::Result;
@@ -23,20 +22,18 @@ use nix::unistd::{unshare, setuid, setgid};
 use nix::sched::CloneFlags;
 use nix::sys::resource::{setrlimit, Resource, Rlimit};
 use libc::{uid_t, gid_t};
+use seccomp::{SeccompFilter, SeccompRule, SeccompAction, SeccompCmpOp, SeccompCmpArgLen};
 
 use super::{SecurityConfig, SecurityEvent, SecuritySeverity};
 
-/**
- * Sandbox configuration defines comprehensive process isolation settings
- * including namespace isolation, resource limits, and security policies.
- * Configuration parameters enable fine-tuned sandboxing policies that
- * can be adjusted based on security requirements and system constraints.
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
 	pub namespace_isolation: bool,
 	pub user_isolation: bool,
 	pub resource_limits: bool,
+	pub seccomp_filtering: bool,
+	pub memory_protection: bool,
+	pub network_isolation: bool,
 	pub max_cpu_time: u64,
 	pub max_memory: u64,
 	pub max_file_size: u64,
@@ -44,6 +41,15 @@ pub struct SandboxConfig {
 	pub max_open_files: u64,
 	pub allowed_directories: Vec<String>,
 	pub blocked_syscalls: Vec<String>,
+	pub allowed_syscalls: Vec<String>,
+	pub memory_protection_rules: Vec<MemoryProtectionRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryProtectionRule {
+	pub address_range: (u64, u64),
+	pub permissions: String,
+	pub description: String,
 }
 
 impl Default for SandboxConfig {
@@ -52,6 +58,9 @@ impl Default for SandboxConfig {
 			namespace_isolation: true,
 			user_isolation: true,
 			resource_limits: true,
+			seccomp_filtering: true,
+			memory_protection: true,
+			network_isolation: true,
 			max_cpu_time: 300,
 			max_memory: 512 * 1024 * 1024,
 			max_file_size: 100 * 1024 * 1024,
@@ -68,17 +77,31 @@ impl Default for SandboxConfig {
 				"clone".to_string(),
 				"kill".to_string(),
 				"ptrace".to_string(),
+				"mount".to_string(),
+				"umount".to_string(),
+				"chroot".to_string(),
+			],
+			allowed_syscalls: vec![
+				"read".to_string(),
+				"write".to_string(),
+				"open".to_string(),
+				"close".to_string(),
+				"exit".to_string(),
+				"brk".to_string(),
+				"mmap".to_string(),
+				"munmap".to_string(),
+			],
+			memory_protection_rules: vec![
+				MemoryProtectionRule {
+					address_range: (0x00000000, 0x00001000),
+					permissions: "r-x".to_string(),
+					description: "Kernel space protection".to_string(),
+				},
 			],
 		}
 	}
 }
 
-/**
- * Sandboxed process information tracks process execution details
- * including resource usage, security violations, and execution status.
- * Process tracking enables comprehensive monitoring and security
- * analysis of sandboxed process behavior.
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxedProcess {
 	pub pid: u32,
@@ -90,13 +113,10 @@ pub struct SandboxedProcess {
 	pub end_time: Option<u64>,
 	pub exit_code: Option<i32>,
 	pub security_violations: Vec<SecurityViolation>,
+	pub seccomp_violations: Vec<SeccompViolation>,
+	pub memory_access_log: Vec<MemoryAccess>,
 }
 
-/**
- * Process status enumeration defines the various states a sandboxed
- * process can be in during its lifecycle. Status tracking enables
- * proper process management and security monitoring.
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProcessStatus {
 	Running,
@@ -104,14 +124,9 @@ pub enum ProcessStatus {
 	Terminated,
 	Suspended,
 	Failed,
+	Quarantined,
 }
 
-/**
- * Resource usage information tracks comprehensive resource consumption
- * by sandboxed processes including CPU, memory, disk I/O, and network
- * usage. Resource monitoring enables detection of resource abuse and
- * security violations.
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceUsage {
 	pub cpu_time: f64,
@@ -120,13 +135,10 @@ pub struct ResourceUsage {
 	pub network_io: u64,
 	pub open_files: u32,
 	pub child_processes: u32,
+	pub syscalls_made: u32,
+	pub memory_regions: u32,
 }
 
-/**
- * Security violation information tracks security policy violations
- * detected during sandboxed process execution. Violation tracking
- * enables security analysis and automated response to security threats.
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityViolation {
 	pub violation_type: String,
@@ -135,30 +147,43 @@ pub struct SecurityViolation {
 	pub severity: SecuritySeverity,
 }
 
-/**
- * Sandbox manager implements comprehensive process sandboxing
- * capabilities including process creation, monitoring, and security
- * enforcement. The manager provides centralized sandbox management
- * that ensures consistent security policies across all sandboxed
- * processes.
- */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeccompViolation {
+	pub syscall: String,
+	pub arguments: Vec<u64>,
+	pub timestamp: u64,
+	pub action_taken: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryAccess {
+	pub address: u64,
+	pub operation: String,
+	pub size: u64,
+	pub timestamp: u64,
+	pub allowed: bool,
+}
+
 pub struct SandboxManager {
 	config: Arc<RwLock<SecurityConfig>>,
 	sandbox_config: SandboxConfig,
 	processes: Arc<RwLock<HashMap<u32, SandboxedProcess>>>,
 	process_counter: Arc<RwLock<u32>>,
+	seccomp_filters: HashMap<String, SeccompFilter>,
 	active: bool,
 }
 
 impl SandboxManager {
 	pub async fn new(config: Arc<RwLock<SecurityConfig>>) -> Result<Self> {
 		let sandbox_config = SandboxConfig::default();
+		let seccomp_filters = Self::initialize_seccomp_filters();
 		
 		Ok(Self {
 			config,
 			sandbox_config,
 			processes: Arc::new(RwLock::new(HashMap::new())),
 			process_counter: Arc::new(RwLock::new(1)),
+			seccomp_filters,
 			active: true,
 		})
 	}
@@ -186,6 +211,14 @@ impl SandboxManager {
 			self.set_resource_limits(child_process.id())?;
 		}
 		
+		if self.sandbox_config.seccomp_filtering {
+			self.apply_seccomp_filter(child_process.id()).await?;
+		}
+		
+		if self.sandbox_config.memory_protection {
+			self.setup_memory_protection(child_process.id()).await?;
+		}
+		
 		let sandboxed_process = SandboxedProcess {
 			pid: child_process.id(),
 			command: command.to_string(),
@@ -198,11 +231,15 @@ impl SandboxManager {
 				network_io: 0,
 				open_files: 0,
 				child_processes: 0,
+				syscalls_made: 0,
+				memory_regions: 0,
 			},
 			start_time,
 			end_time: None,
 			exit_code: None,
 			security_violations: Vec::new(),
+			seccomp_violations: Vec::new(),
+			memory_access_log: Vec::new(),
 		};
 		
 		self.processes.write().await.insert(pid, sandboxed_process);
@@ -246,9 +283,55 @@ impl SandboxManager {
 		Ok(())
 	}
 	
+	async fn apply_seccomp_filter(&self, pid: u32) -> Result<()> {
+		let mut rules = Vec::new();
+		
+		for syscall in &self.sandbox_config.allowed_syscalls {
+			rules.push(SeccompRule::new(
+				syscall.parse()?,
+				vec![],
+				SeccompAction::Allow,
+			));
+		}
+		
+		for syscall in &self.sandbox_config.blocked_syscalls {
+			rules.push(SeccompRule::new(
+				syscall.parse()?,
+				vec![],
+				SeccompAction::Kill,
+			));
+		}
+		
+		let filter = SeccompFilter::new(rules, SeccompAction::Kill)?;
+		filter.apply_to_pid(pid)?;
+		
+		Ok(())
+	}
+	
+	async fn setup_memory_protection(&self, pid: u32) -> Result<()> {
+		for rule in &self.sandbox_config.memory_protection_rules {
+			let (start, end) = rule.address_range;
+			
+			unsafe {
+				let result = libc::mprotect(
+					start as *mut libc::c_void,
+					(end - start) as libc::size_t,
+					libc::PROT_READ | libc::PROT_EXEC,
+				);
+				
+				if result != 0 {
+					return Err(anyhow::anyhow!("Failed to set memory protection"));
+				}
+			}
+		}
+		
+		Ok(())
+	}
+	
 	async fn start_monitoring(&self, pid: u32) -> Result<()> {
 		let processes = self.processes.clone();
 		let config = self.config.clone();
+		let sandbox_config = self.sandbox_config.clone();
 		
 		tokio::spawn(async move {
 			let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
@@ -262,10 +345,27 @@ impl SandboxManager {
 							process.resource_usage = usage;
 						}
 						
-						if let Some(violation) = Self::check_security_violations(process, &config).await {
+						if let Some(violation) = Self::check_security_violations(process, &config, &sandbox_config).await {
 							process.security_violations.push(violation);
 							
 							if violation.severity == SecuritySeverity::Critical {
+								Self::terminate_process(pid).await;
+								process.status = ProcessStatus::Terminated;
+								process.end_time = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+							}
+						}
+						
+						if let Some(seccomp_violation) = Self::check_seccomp_violations(process).await {
+							process.seccomp_violations.push(seccomp_violation);
+							Self::terminate_process(pid).await;
+							process.status = ProcessStatus::Terminated;
+							process.end_time = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+						}
+						
+						if let Some(memory_access) = Self::check_memory_access(process, &sandbox_config).await {
+							process.memory_access_log.push(memory_access);
+							
+							if !memory_access.allowed {
 								Self::terminate_process(pid).await;
 								process.status = ProcessStatus::Terminated;
 								process.end_time = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
@@ -323,6 +423,14 @@ impl SandboxManager {
 			})
 			.unwrap_or(0);
 		
+		let syscalls_made = std::fs::read_to_string(format!("/proc/{}/syscall", pid))
+			.map(|_| 1)
+			.unwrap_or(0);
+		
+		let memory_regions = std::fs::read_to_string(format!("/proc/{}/maps", pid))
+			.map(|content| content.lines().count() as u32)
+			.unwrap_or(0);
+		
 		Ok(ResourceUsage {
 			cpu_time,
 			memory_usage,
@@ -330,32 +438,34 @@ impl SandboxManager {
 			network_io: 0,
 			open_files,
 			child_processes,
+			syscalls_made,
+			memory_regions,
 		})
 	}
 	
-	async fn check_security_violations(process: &SandboxedProcess, config: &Arc<RwLock<SecurityConfig>>) -> Option<SecurityViolation> {
+	async fn check_security_violations(process: &SandboxedProcess, config: &Arc<RwLock<SecurityConfig>>, sandbox_config: &SandboxConfig) -> Option<SecurityViolation> {
 		let config_guard = config.read().await;
 		
-		if process.resource_usage.memory_usage > config_guard.max_file_size {
+		if process.resource_usage.memory_usage > sandbox_config.max_memory {
 			return Some(SecurityViolation {
 				violation_type: "memory_limit_exceeded".to_string(),
 				description: format!("Memory usage {} exceeds limit {}", 
-					process.resource_usage.memory_usage, config_guard.max_file_size),
+					process.resource_usage.memory_usage, sandbox_config.max_memory),
 				timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
 				severity: SecuritySeverity::High,
 			});
 		}
 		
-		if process.resource_usage.cpu_time > 300.0 {
+		if process.resource_usage.cpu_time > sandbox_config.max_cpu_time as f64 {
 			return Some(SecurityViolation {
 				violation_type: "cpu_time_exceeded".to_string(),
-				description: format!("CPU time {} exceeds limit", process.resource_usage.cpu_time),
+				description: format!("CPU time {} exceeds limit {}", process.resource_usage.cpu_time, sandbox_config.max_cpu_time),
 				timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
 				severity: SecuritySeverity::Medium,
 			});
 		}
 		
-		if process.resource_usage.child_processes > 10 {
+		if process.resource_usage.child_processes > sandbox_config.max_processes {
 			return Some(SecurityViolation {
 				violation_type: "too_many_child_processes".to_string(),
 				description: format!("Too many child processes: {}", process.resource_usage.child_processes),
@@ -364,7 +474,7 @@ impl SandboxManager {
 			});
 		}
 		
-		if process.resource_usage.open_files > 100 {
+		if process.resource_usage.open_files > sandbox_config.max_open_files {
 			return Some(SecurityViolation {
 				violation_type: "too_many_open_files".to_string(),
 				description: format!("Too many open files: {}", process.resource_usage.open_files),
@@ -374,6 +484,53 @@ impl SandboxManager {
 		}
 		
 		None
+	}
+	
+	async fn check_seccomp_violations(process: &SandboxedProcess) -> Option<SeccompViolation> {
+		if process.seccomp_violations.len() > 0 {
+			return Some(SeccompViolation {
+				syscall: "blocked_syscall".to_string(),
+				arguments: vec![],
+				timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+				action_taken: "process_terminated".to_string(),
+			});
+		}
+		
+		None
+	}
+	
+	async fn check_memory_access(process: &SandboxedProcess, sandbox_config: &SandboxConfig) -> Option<MemoryAccess> {
+		for rule in &sandbox_config.memory_protection_rules {
+			let (start, end) = rule.address_range;
+			
+			if process.resource_usage.memory_usage >= start && process.resource_usage.memory_usage <= end {
+				return Some(MemoryAccess {
+					address: process.resource_usage.memory_usage,
+					operation: "access".to_string(),
+					size: 1,
+					timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+					allowed: false,
+				});
+			}
+		}
+		
+		None
+	}
+	
+	fn initialize_seccomp_filters() -> HashMap<String, SeccompFilter> {
+		let mut filters = HashMap::new();
+		
+		let basic_rules = vec![
+			SeccompRule::new(libc::SYS_read, vec![], SeccompAction::Allow),
+			SeccompRule::new(libc::SYS_write, vec![], SeccompAction::Allow),
+			SeccompRule::new(libc::SYS_exit, vec![], SeccompAction::Allow),
+		];
+		
+		if let Ok(filter) = SeccompFilter::new(basic_rules, SeccompAction::Kill) {
+			filters.insert("basic".to_string(), filter);
+		}
+		
+		filters
 	}
 	
 	async fn is_process_running(pid: u32) -> bool {
@@ -390,6 +547,15 @@ impl SandboxManager {
 		if let Some(process) = self.processes.write().await.get_mut(&pid) {
 			process.status = ProcessStatus::Terminated;
 			process.end_time = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
+		}
+		
+		Self::terminate_process(pid).await;
+		Ok(())
+	}
+	
+	pub async fn quarantine_process(&self, pid: u32) -> Result<()> {
+		if let Some(process) = self.processes.write().await.get_mut(&pid) {
+			process.status = ProcessStatus::Quarantined;
 		}
 		
 		Self::terminate_process(pid).await;
