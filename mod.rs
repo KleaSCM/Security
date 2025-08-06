@@ -20,19 +20,19 @@ pub mod response_automation;
 pub mod behavioral_analysis;
 pub mod forensic_capture;
 pub mod deception_system;
+pub mod memory_forensics;
+pub mod network_analysis;
+pub mod ml_threat_detection;
 
 use threat_detection::{ThreatDetector, ThreatType, ThreatScore};
 use response_automation::{ResponseAutomation, ThreatResponseAction};
 use behavioral_analysis::{BehavioralAnalyzer, BehaviorPattern};
 use forensic_capture::{ForensicCapture, EvidenceType};
 use deception_system::{DeceptionSystem, HoneypotManager};
+use memory_forensics::{MemoryForensics, MemoryAnalysisResult};
+use network_analysis::{NetworkAnalyzer, NetworkAnalysisResult};
+use ml_threat_detection::{MLThreatDetector, MLThreatResult};
 
-/**
- * Security configuration for the entire system
- * 
- * Why: Centralized configuration allows for consistent security policies
- * across all components while maintaining flexibility for different environments.
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
 	pub sandbox_enabled: bool,
@@ -52,14 +52,10 @@ pub struct SecurityConfig {
 	pub threat_response: ThreatResponseConfig,
 	pub behavioral_analysis: BehavioralAnalysisConfig,
 	pub network_monitoring: NetworkMonitoringConfig,
+	pub memory_forensics: MemoryForensicsConfig,
+	pub ml_detection: MLDetectionConfig,
 }
 
-/**
- * Threat response configuration
- * 
- * Why: Separate configuration allows for fine-tuned response policies
- * based on threat severity and system requirements.
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreatResponseConfig {
 	pub automatic_response_enabled: bool,
@@ -70,12 +66,6 @@ pub struct ThreatResponseConfig {
 	pub response_actions: Vec<ThreatResponseAction>,
 }
 
-/**
- * Behavioral analysis configuration
- * 
- * Why: Behavioral analysis requires specific configuration for pattern
- * detection and anomaly thresholds that may vary by environment.
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehavioralAnalysisConfig {
 	pub behavioral_analysis_enabled: bool,
@@ -84,12 +74,6 @@ pub struct BehavioralAnalysisConfig {
 	pub anomaly_sensitivity: f64,
 }
 
-/**
- * Network monitoring configuration
- * 
- * Why: Network monitoring needs specific configuration for traffic
- * analysis and threat detection patterns.
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkMonitoringConfig {
 	pub network_monitoring_enabled: bool,
@@ -98,12 +82,22 @@ pub struct NetworkMonitoringConfig {
 	pub traffic_analysis: bool,
 }
 
-/**
- * Threat response actions
- * 
- * Why: Defines the available response actions that can be taken
- * when threats are detected, allowing for flexible response strategies.
- */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryForensicsConfig {
+	pub memory_forensics_enabled: bool,
+	pub scan_interval: u64,
+	pub suspicious_processes: Vec<String>,
+	pub memory_threshold: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MLDetectionConfig {
+	pub ml_detection_enabled: bool,
+	pub model_update_interval: u64,
+	pub confidence_threshold: f64,
+	pub training_enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ThreatResponseAction {
 	Log,
@@ -116,14 +110,11 @@ pub enum ThreatResponseAction {
 	Deception,
 	Honeypot,
 	ForensicCapture,
+	MemoryDump,
+	NetworkBlock,
+	MLRetrain,
 }
 
-/**
- * Security log levels
- * 
- * Why: Different log levels allow for appropriate verbosity
- * based on security requirements and debugging needs.
- */
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SecurityLogLevel {
 	Minimal,
@@ -132,12 +123,6 @@ pub enum SecurityLogLevel {
 	Debug,
 }
 
-/**
- * Security events that can be detected and processed
- * 
- * Why: Defines the types of security events that the system
- * can detect and respond to, providing comprehensive coverage.
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SecurityEvent {
 	CommandExecution {
@@ -174,14 +159,21 @@ pub enum SecurityEvent {
 		severity: SecuritySeverity,
 		timestamp: u64,
 	},
+	MemoryAccess {
+		pid: i32,
+		address: u64,
+		operation: String,
+		timestamp: u64,
+	},
+	NetworkPacket {
+		source_ip: String,
+		dest_ip: String,
+		protocol: String,
+		payload_size: u32,
+		timestamp: u64,
+	},
 }
 
-/**
- * Security severity levels
- * 
- * Why: Severity levels help prioritize responses and determine
- * appropriate action based on threat criticality.
- */
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SecuritySeverity {
 	Low,
@@ -190,12 +182,6 @@ pub enum SecuritySeverity {
 	Critical,
 }
 
-/**
- * Main security manager that orchestrates all security components
- * 
- * Why: Centralized security management allows for coordinated
- * threat detection and response across all system components.
- */
 pub struct SecurityManager {
 	config: Arc<RwLock<SecurityConfig>>,
 	threat_detector: ThreatDetector,
@@ -203,6 +189,9 @@ pub struct SecurityManager {
 	behavioral_analyzer: BehavioralAnalyzer,
 	forensic_capture: ForensicCapture,
 	deception_system: DeceptionSystem,
+	memory_forensics: MemoryForensics,
+	network_analyzer: NetworkAnalyzer,
+	ml_threat_detector: MLThreatDetector,
 	active: bool,
 }
 
@@ -213,6 +202,9 @@ impl SecurityManager {
 		let behavioral_analyzer = BehavioralAnalyzer::new(config.clone()).await?;
 		let forensic_capture = ForensicCapture::new(config.clone()).await?;
 		let deception_system = DeceptionSystem::new(config.clone()).await?;
+		let memory_forensics = MemoryForensics::new()?;
+		let network_analyzer = NetworkAnalyzer::new()?;
+		let ml_threat_detector = MLThreatDetector::new()?;
 
 		Ok(Self {
 			config,
@@ -221,38 +213,53 @@ impl SecurityManager {
 			behavioral_analyzer,
 			forensic_capture,
 			deception_system,
+			memory_forensics,
+			network_analyzer,
+			ml_threat_detector,
 			active: true,
 		})
 	}
 
 	pub async fn process_security_event(&mut self, event: SecurityEvent) -> Result<Vec<ThreatResponseAction>> {
-		/**
-		 * Process security event through the complete threat detection and response pipeline
-		 * 
-		 * Why: Comprehensive event processing ensures all threats are detected
-		 * and appropriate responses are executed based on threat analysis.
-		 */
-		
 		let threat_score = self.threat_detector.analyze_threat(&event).await?;
 		let threat_type = self.threat_detector.classify_threat(&event).await?;
 		
 		let behavior_pattern = self.behavioral_analyzer.analyze_behavior(&event).await?;
 		
+		let ml_result = self.ml_threat_detector.analyze_threat(&event).await?;
+		
+		let combined_threat_score = (threat_score.value + ml_result.threat_score) / 2.0;
+		
 		let actions = self.response_automation.determine_response(
 			&event,
-			threat_score,
+			ThreatScore { value: combined_threat_score, confidence: ml_result.confidence, factors: vec![] },
 			threat_type,
 			&behavior_pattern,
 		).await?;
 		
 		self.execute_responses(&actions).await?;
 		
-		if threat_score.value > 0.8 {
+		if combined_threat_score > 0.8 {
 			self.forensic_capture.capture_evidence(&event).await?;
 		}
 		
-		if threat_score.value > 0.6 {
+		if combined_threat_score > 0.6 {
 			self.deception_system.deploy_deception(&event).await?;
+		}
+
+		if let SecurityEvent::MemoryAccess { pid, .. } = event {
+			let memory_result = self.memory_forensics.analyze_process_memory(pid).await?;
+			if memory_result.threat_score > 0.7 {
+				actions.push(ThreatResponseAction::MemoryDump);
+			}
+		}
+
+		if let SecurityEvent::NetworkPacket { .. } = event {
+			// Network analysis would be handled separately in a real implementation
+		}
+
+		if ml_result.confidence > 0.9 && !ml_result.detected_patterns.is_empty() {
+			actions.push(ThreatResponseAction::MLRetrain);
 		}
 		
 		Ok(actions)
@@ -301,6 +308,21 @@ impl SecurityManager {
 						.args(&["-w", "/tmp/forensic.pcap", "-i", "any"])
 						.output()?;
 				}
+				ThreatResponseAction::MemoryDump => {
+					std::process::Command::new("gcore")
+						.args(&["-o", "/tmp/memory_dump", "suspicious_pid"])
+						.output()?;
+				}
+				ThreatResponseAction::NetworkBlock => {
+					std::process::Command::new("iptables")
+						.args(&["-A", "INPUT", "-s", "malicious_ip", "-j", "DROP"])
+						.output()?;
+				}
+				ThreatResponseAction::MLRetrain => {
+					std::process::Command::new("echo")
+						.args(&["ML model retraining triggered"])
+						.output()?;
+				}
 				ThreatResponseAction::Alert => {
 					std::process::Command::new("wall")
 						.args(&["🚨 CRITICAL SECURITY ALERT: System under attack! 🚨"])
@@ -327,6 +349,18 @@ impl SecurityManager {
 		// Return current configuration
 		SecurityConfig::default()
 	}
+
+	pub async fn analyze_network_traffic(&mut self, packet_data: &[u8]) -> Result<NetworkAnalysisResult> {
+		self.network_analyzer.analyze_packet(packet_data).await
+	}
+
+	pub async fn analyze_process_memory(&mut self, pid: i32) -> Result<MemoryAnalysisResult> {
+		self.memory_forensics.analyze_process_memory(pid).await
+	}
+
+	pub async fn analyze_with_ml(&mut self, event: &SecurityEvent) -> Result<MLThreatResult> {
+		self.ml_threat_detector.analyze_threat(event).await
+	}
 }
 
 impl Default for SecurityConfig {
@@ -349,6 +383,8 @@ impl Default for SecurityConfig {
 			threat_response: ThreatResponseConfig::default(),
 			behavioral_analysis: BehavioralAnalysisConfig::default(),
 			network_monitoring: NetworkMonitoringConfig::default(),
+			memory_forensics: MemoryForensicsConfig::default(),
+			ml_detection: MLDetectionConfig::default(),
 		}
 	}
 }
@@ -387,6 +423,28 @@ impl Default for NetworkMonitoringConfig {
 			blocked_ips: vec!["192.168.1.100".to_string()],
 			suspicious_patterns: vec!["malware".to_string(), "exploit".to_string()],
 			traffic_analysis: true,
+		}
+	}
+}
+
+impl Default for MemoryForensicsConfig {
+	fn default() -> Self {
+		Self {
+			memory_forensics_enabled: true,
+			scan_interval: 300,
+			suspicious_processes: vec!["malware".to_string(), "backdoor".to_string()],
+			memory_threshold: 1024 * 1024 * 1024,
+		}
+	}
+}
+
+impl Default for MLDetectionConfig {
+	fn default() -> Self {
+		Self {
+			ml_detection_enabled: true,
+			model_update_interval: 3600,
+			confidence_threshold: 0.8,
+			training_enabled: true,
 		}
 	}
 } 
